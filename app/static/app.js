@@ -41,6 +41,26 @@ function yuan(v) {
   return Number(v).toFixed(2);
 }
 
+/* 精确金额回填：后端对换乘抵扣额 / 每日封顶额同时输出数字字段（元，浮点）
+   与 *_text 精确十进制文本（整数分原值，不经过浮点）。超大金额
+   （超过 JS Number 安全整数范围，如 92233720368547758.07）必须使用
+   文本字段，数字字段已被浮点尾数舍入；旧响应无文本字段时回退数字。 */
+function exactAmount(obj, key) {
+  const t = obj[key + "_text"];
+  return (t === undefined || t === null || t === "")
+    ? String(obj[key])
+    : String(t);
+}
+
+/* 展示金额同样优先使用精确文本（文本恒为两位小数，原样展示，
+   不经过 Number，避免超大金额显示成邻近值）。 */
+function fmtAmount(obj, key) {
+  const t = obj[key + "_text"];
+  return (t === undefined || t === null || t === "")
+    ? yuan(obj[key])
+    : String(t);
+}
+
 function actionText(a) {
   return a === "IN" ? "进 ▲" : "出 ▼";
 }
@@ -51,18 +71,32 @@ async function loadConfig() {
   const cfg = await api("/api/config");
   $("cfg-split").value = cfg.day_split_hour;
   $("cfg-minutes").value = cfg.transfer_minutes;
-  $("cfg-discount").value = cfg.transfer_discount;
-  $("cfg-cap").value = cfg.daily_cap;
+  // 金额回填精确十进制文本（整数分原值），不转 Number：
+  // 超大金额转 Number 会得到邻近浮点，直接再保存就会被后端判为非法。
+  $("cfg-discount").value = exactAmount(cfg, "transfer_discount");
+  $("cfg-cap").value = exactAmount(cfg, "daily_cap");
   return cfg;
 }
 
 async function saveConfig() {
+  const discount = $("cfg-discount").value.trim();
+  const cap = $("cfg-cap").value.trim();
+  // 金额以文本原样提交（数字兼容字段与 *_text 精确字段同值）：
+  // 未编辑时回填的就是 GET 返回的精确文本，再保存不会把原金额改成邻近值。
+  // 留空 / 非法格式由后端按既有规则返回带字段名的 422（CONFIG_BAD）。
   const body = {
     day_split_hour: Number($("cfg-split").value),
     transfer_minutes: Number($("cfg-minutes").value),
-    transfer_discount: Number($("cfg-discount").value),
-    daily_cap: Number($("cfg-cap").value),
+    transfer_discount: discount,
+    daily_cap: cap,
+    transfer_discount_text: discount,
+    daily_cap_text: cap,
   };
+  if (!Number.isFinite(body.day_split_hour) ||
+      !Number.isFinite(body.transfer_minutes) || discount === "" || cap === "") {
+    toast("四项规则参数必须全部填写；金额须为非负、最多两位小数的数字", false);
+    return;
+  }
   try {
     await api("/api/config", { method: "PUT", body: JSON.stringify(body) });
     toast("规则参数已保存");
@@ -76,18 +110,21 @@ async function saveConfig() {
 function fillTrialInputs(cfg) {
   $("trial-split").value = cfg.day_split_hour;
   $("trial-minutes").value = cfg.transfer_minutes;
-  $("trial-discount").value = cfg.transfer_discount;
-  $("trial-cap").value = cfg.daily_cap;
+  // 草案金额同样回填精确文本：复制到草案试算使用与已保存配置同一原值，
+  // 不经过 Number，超大金额不会失真；试算为只读，不保存任何配置。
+  $("trial-discount").value = exactAmount(cfg, "transfer_discount");
+  $("trial-cap").value = exactAmount(cfg, "daily_cap");
 }
 
 async function copyCurrentToTrial() {
   fillTrialInputs(await api("/api/config"));
-  toast("已将当前已保存参数填入草案，可在此基础上修改");
+  toast("已将当前已保存参数（含精确金额原值）填入草案，可在此基础上修改");
 }
 
 function fmtConfig(c) {
   return `分界 ${c.day_split_hour}:00 · 换乘 ${c.transfer_minutes} 分钟 · ` +
-         `抵扣 ${yuan(c.transfer_discount)} 元 · 封顶 ${yuan(c.daily_cap)} 元`;
+         `抵扣 ${fmtAmount(c, "transfer_discount")} 元 · ` +
+         `封顶 ${fmtAmount(c, "daily_cap")} 元`;
 }
 
 function deltaClass(v) {
@@ -181,14 +218,22 @@ function renderTrialResult(data) {
 
 async function runTrialCompare() {
   const status = $("trial-status");
+  const discount = $("trial-discount").value.trim();
+  const cap = $("trial-cap").value.trim();
+  // 草案金额以文本原样提交（数字兼容字段与 *_text 精确字段同值），
+  // 与保存配置同一口径；草案只用于只读试算，不写入配置。
   const body = {
     day_split_hour: Number($("trial-split").value),
     transfer_minutes: Number($("trial-minutes").value),
-    transfer_discount: Number($("trial-discount").value),
-    daily_cap: Number($("trial-cap").value),
+    transfer_discount: discount,
+    daily_cap: cap,
+    transfer_discount_text: discount,
+    daily_cap_text: cap,
   };
-  if (Object.values(body).some((v) => !Number.isFinite(v))) {
-    status.textContent = "草案四项参数必须全部填写为有效数字";
+  if (!Number.isFinite(body.day_split_hour) ||
+      !Number.isFinite(body.transfer_minutes) || discount === "" || cap === "") {
+    status.textContent =
+      "草案四项参数必须全部填写；金额须为非负、最多两位小数的数字";
     status.className = "status bad";
     return;
   }

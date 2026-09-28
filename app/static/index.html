@@ -30,10 +30,12 @@
           <input type="number" id="cfg-minutes" min="1" />
         </label>
         <label>换乘抵扣额（元）
-          <input type="number" id="cfg-discount" min="0" step="0.01" />
+          <input type="text" inputmode="decimal" id="cfg-discount"
+                 placeholder="非负、最多两位小数" />
         </label>
         <label>每卡每日封顶额（元）
-          <input type="number" id="cfg-cap" min="0" step="0.01" />
+          <input type="text" inputmode="decimal" id="cfg-cap"
+                 placeholder="非负、最多两位小数" />
         </label>
       </div>
       <div class="row-actions">
@@ -56,10 +58,12 @@
           <input type="number" id="trial-minutes" min="1" />
         </label>
         <label>草案：换乘抵扣额（元）
-          <input type="number" id="trial-discount" min="0" step="0.01" />
+          <input type="text" inputmode="decimal" id="trial-discount"
+                 placeholder="非负、最多两位小数" />
         </label>
         <label>草案：每卡每日封顶额（元）
-          <input type="number" id="trial-cap" min="0" step="0.01" />
+          <input type="text" inputmode="decimal" id="trial-cap"
+                 placeholder="非负、最多两位小数" />
         </label>
       </div>
       <div class="row-actions">

@@ -285,6 +285,139 @@ def test_http_huge_fare_and_cap_return_422(temp_db):
 
 
 # ---------------------------------------------------------------------------
+# 原值往返：GET 输出精确十进制文本，页面回填后未编辑再保存不改值；
+# 复制到草案试算使用同一原值（只读）
+# ---------------------------------------------------------------------------
+
+def test_config_get_emits_exact_text_companions(temp_db):
+    main.put_config(ConfigIn(
+        transfer_minutes=90, transfer_discount="1.5",
+        daily_cap=MAX_YUAN, day_split_hour=4,
+        transfer_discount_text="1.5", daily_cap_text=MAX_YUAN))
+    client = TestClient(main.app)
+    cfg = client.get("/api/config").json()
+    # 数字金额字段保持既有 API 形态（浮点，超大值可能失真）……
+    assert cfg["transfer_discount"] == 1.5
+    assert isinstance(cfg["daily_cap"], float)
+    # ……同时给出整数分原值格式化的精确十进制文本，不经过浮点。
+    assert cfg["transfer_discount_text"] == "1.50"
+    assert cfg["daily_cap_text"] == MAX_YUAN
+    with db.connect() as conn:
+        assert db.get_config(conn).daily_cap_cents == MAX_CENTS
+
+
+def test_unchanged_resave_of_backfilled_text_keeps_exact_cents(temp_db):
+    """模拟页面：GET -> 文本框回填 *_text -> 未编辑直接再保存。"""
+    main.put_config(ConfigIn(
+        transfer_minutes=90, transfer_discount=MAX_YUAN,
+        daily_cap=MAX_YUAN, day_split_hour=4,
+        transfer_discount_text=MAX_YUAN, daily_cap_text=MAX_YUAN))
+    client = TestClient(main.app)
+    cfg = client.get("/api/config").json()
+
+    # 页面提交时数字兼容字段与 *_text 精确字段均为回填文本原值
+    r = client.put("/api/config", json={
+        "transfer_minutes": cfg["transfer_minutes"],
+        "transfer_discount": cfg["transfer_discount_text"],
+        "daily_cap": cfg["daily_cap_text"],
+        "day_split_hour": cfg["day_split_hour"],
+        "transfer_discount_text": cfg["transfer_discount_text"],
+        "daily_cap_text": cfg["daily_cap_text"],
+    })
+    assert r.status_code == 200, r.text
+    with db.connect() as conn:
+        saved = db.get_config(conn)
+    assert saved.transfer_discount_cents == MAX_CENTS
+    assert saved.daily_cap_cents == MAX_CENTS
+
+
+def test_text_companion_takes_precedence_over_rounded_float(temp_db):
+    """旧路径传来的浮点已失真时，*_text 精确文本仍能原值保存。"""
+    rounded = 92233720368547758.08  # JS Number 回填 ...58.07 时的邻近值
+    main.put_config(ConfigIn(
+        transfer_minutes=90, transfer_discount=rounded,
+        daily_cap=rounded, day_split_hour=4,
+        transfer_discount_text="1.00", daily_cap_text=MAX_YUAN))
+    with db.connect() as conn:
+        saved = db.get_config(conn)
+    assert saved.transfer_discount_cents == 100
+    assert saved.daily_cap_cents == MAX_CENTS
+
+
+def test_blank_text_companion_falls_back_to_numeric(temp_db):
+    """旧 / 第三方客户端不传 *_text（或传空串）时，行为与旧版一致。"""
+    resp = main.put_config(ConfigIn(
+        transfer_minutes=90, transfer_discount=2.5,
+        daily_cap=10.0, day_split_hour=4,
+        transfer_discount_text="  ", daily_cap_text=""))
+    assert not isinstance(resp, JSONResponse)
+    with db.connect() as conn:
+        saved = db.get_config(conn)
+    assert saved.transfer_discount_cents == 250
+    assert saved.daily_cap_cents == 1000
+
+
+def test_illegal_text_companion_returns_422_with_field(temp_db):
+    client = TestClient(main.app)
+    r = client.put("/api/config", json={
+        "transfer_minutes": 90, "transfer_discount": "1.234",
+        "daily_cap": MAX_YUAN, "day_split_hour": 4,
+        "transfer_discount_text": "1.234", "daily_cap_text": MAX_YUAN})
+    assert r.status_code == 422
+    err = r.json()["errors"][0]
+    assert err["code"] == "CONFIG_BAD"
+    assert err["location"]["param"] == "transfer_discount"
+
+
+def test_trial_copy_current_uses_exact_original_amount(temp_db):
+    """「复制到草案」以精确文本带入超大金额：试算 200 且只读不改配置。"""
+    _seed("1, 2, 5.00\n2, 1, 5.00\n")
+    client = TestClient(main.app)
+    client.put("/api/config", json={
+        "transfer_minutes": 90, "transfer_discount": "1.50",
+        "daily_cap": MAX_YUAN, "day_split_hour": 4,
+        "transfer_discount_text": "1.50", "daily_cap_text": MAX_YUAN})
+    cfg = client.get("/api/config").json()
+
+    r = client.post("/api/trial-compare", json={
+        "transfer_minutes": cfg["transfer_minutes"],
+        "transfer_discount": cfg["transfer_discount_text"],
+        "daily_cap": cfg["daily_cap_text"],
+        "day_split_hour": cfg["day_split_hour"],
+        "transfer_discount_text": cfg["transfer_discount_text"],
+        "daily_cap_text": cfg["daily_cap_text"],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["current"]["config"]["daily_cap_text"] == MAX_YUAN
+    assert body["draft"]["config"]["daily_cap_text"] == MAX_YUAN
+    assert body["current"]["config"]["transfer_discount_text"] == "1.50"
+    # 草案即当前原值：两边金额完全一致
+    assert body["batch_summary"]["charge_diff"] == 0
+    # 试算只读：已保存配置仍是精确原值，账单未生成
+    assert client.get("/api/config").json()["daily_cap_text"] == MAX_YUAN
+    with db.connect() as conn:
+        assert db.get_meta(conn, "last_verified_at") is None
+
+
+def test_trial_invalid_text_amount_422_echoes_text(temp_db):
+    _seed("1, 2, 3.00\n")
+    client = TestClient(main.app)
+    r = client.post("/api/trial-compare", json={
+        "transfer_minutes": 90, "transfer_discount": "oops",
+        "daily_cap": MAX_YUAN, "day_split_hour": 4,
+        "transfer_discount_text": "oops", "daily_cap_text": MAX_YUAN})
+    assert r.status_code == 422
+    body = r.json()
+    assert body["current"]["ok"] is True
+    assert body["draft"]["ok"] is False
+    err = body["draft"]["errors"][0]
+    assert err["code"] == "CONFIG_BAD"
+    assert err["location"]["param"] == "transfer_discount"
+    assert body["draft"]["config"]["transfer_discount_text"] == "oops"
+
+
+# ---------------------------------------------------------------------------
 # 旧库迁移：旧版本元文本金额键升级后仍生效，首次保存后切换到分键
 # ---------------------------------------------------------------------------
 

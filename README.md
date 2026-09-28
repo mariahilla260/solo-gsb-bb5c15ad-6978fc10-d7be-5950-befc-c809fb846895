@@ -361,6 +361,17 @@ DB_PATH=./bus.db uvicorn app.main:app --host 0.0.0.0 --port 8000
   核验计算与账单落库始终使用**同一整数分口径**（`decimal` 解析，
   全程不经过浮点），边界值既不会在保存时触发 SQLite 整数溢出，
   也不会被浮点尾数舍入失真。
+- **原值往返（读取 → 回填 → 再保存 / 复制到草案）**：库内金额为整数分，
+  而 `GET /api/config` 与试算接口的数字金额字段是浮点元，超大金额
+  （超过 JS `Number` 安全整数范围，如 `92233720368547758.07`）会被
+  浮点尾数舍入成邻近值，页面回填后直接再保存会被判为非法 / 改值。
+  因此读取接口对**换乘抵扣额与每日封顶额**同时给出精确十进制文本
+  伴生字段 `transfer_discount_text` / `daily_cap_text`（由整数分原值
+  直接格式化，恒为两位小数、不经过浮点）；页面金额框按文本精确回填，
+  保存与试算时把文本同时放入数字字段与 `*_text` 字段提交，
+  **未编辑时再保存仍是同一整数分原值，不会变成邻近值**；
+  「用已保存参数填入草案」同样带入精确文本，试算使用同一原值且
+  **全程只读**。旧客户端不传 `*_text` 时完全沿用数字字段，行为不变。
 
 ### 内置演示数据
 
@@ -428,6 +439,51 @@ DB_PATH=./bus.db uvicorn app.main:app --host 0.0.0.0 --port 8000
 | GET | `/api/bills` | 读取最近一次成功核验的账单 |
 | GET | `/api/health` | 健康检查 |
 
+### `/api/config` 规则参数（金额原值往返）
+
+`GET /api/config` 返回当前规则参数。金额同时输出**数字字段（元，浮点）**
+与**精确十进制文本字段（整数分原值格式化，不经过浮点）**：
+
+```json
+{
+  "transfer_minutes": 90,
+  "transfer_discount": 1.0,
+  "transfer_discount_text": "1.00",
+  "daily_cap": 9.223372036854776e16,
+  "daily_cap_text": "92233720368547758.07",
+  "day_split_hour": 4
+}
+```
+
+- 页面与脚本回填时应优先使用 `*_text`：数字字段在超大金额下会显示为
+  浮点近似值（上例 `daily_cap`），而 `daily_cap_text` 恒为两位小数的
+  精确原值；普通金额两者一致（`1.0` 对应 `"1.00"`）。
+- `PUT /api/config` 请求体中 `transfer_discount` / `daily_cap` 接受
+  JSON 数字或十进制字符串；另可传 `transfer_discount_text` /
+  `daily_cap_text` 精确文本，**存在（非空）时优先于数字字段解析**。
+  页面保存时把金额框文本同时放入数字字段与 `*_text` 字段：
+
+```bash
+# 保存上限金额（精确十进制文本；数字字段放同一文本即可）
+curl -sS -X PUT http://localhost:8000/api/config \
+  -H 'Content-Type: application/json' \
+  -d '{"transfer_minutes":90,"day_split_hour":4,
+       "transfer_discount":"1.00","daily_cap":"92233720368547758.07",
+       "transfer_discount_text":"1.00",
+       "daily_cap_text":"92233720368547758.07"}'
+
+# 读取：回填 / 再保存一律使用 *_text，未编辑时原值往返
+curl -sS http://localhost:8000/api/config
+```
+
+- 未传 / 传空 `*_text` 时回退数字字段，旧客户端不受影响；非法金额
+  （负数、超过两位小数、超出 64 位整数分范围）返回 **422 +
+  `CONFIG_BAD`**，`location.param` 为 `transfer_discount` /
+  `daily_cap`，且不写任何数据（配置、账单、版本均不变）。
+- `POST /api/trial-compare` 的请求体与响应中的 `current.config` /
+  `draft.config` 同样支持并回显这两个 `*_text` 字段；页面
+  「用已保存参数填入草案」原样带入精确文本，试算只读、不保存配置。
+
 ### `/api/verify` 核验（含并发保护）
 
 无请求体。分三个阶段执行：
@@ -458,14 +514,18 @@ DB_PATH=./bus.db uvicorn app.main:app --host 0.0.0.0 --port 8000
 ### `/api/trial-compare` 规则试算对比
 
 请求体为**草案参数**（均必填；数值合法性由核心层校验，非法时返回 422 +
-`CONFIG_BAD`，而不是请求体校验错误）：
+`CONFIG_BAD`，而不是请求体校验错误）。金额可像保存配置一样附带
+`transfer_discount_text` / `daily_cap_text` 精确文本（页面「用已保存
+参数填入草案」即原样带入），超大金额据此原值往返；不传时回退数字字段：
 
 ```json
 {
   "transfer_minutes": 120,
   "transfer_discount": 2.00,
   "daily_cap": 15.00,
-  "day_split_hour": 5
+  "day_split_hour": 5,
+  "transfer_discount_text": "2.00",
+  "daily_cap_text": "15.00"
 }
 ```
 
@@ -476,8 +536,14 @@ DB_PATH=./bus.db uvicorn app.main:app --host 0.0.0.0 --port 8000
   "ok": true,
   "current": { "ok": true, "errors": [], "bill_count": 5,
                "config": {"transfer_minutes": 90, "transfer_discount": 1.0,
-                          "daily_cap": 10.0, "day_split_hour": 4} },
-  "draft":   { "ok": true, "errors": [], "bill_count": 5, "config": { } },
+                          "transfer_discount_text": "1.00",
+                          "daily_cap": 10.0, "daily_cap_text": "10.00",
+                          "day_split_hour": 4} },
+  "draft":   { "ok": true, "errors": [], "bill_count": 5,
+               "config": {"transfer_minutes": 120, "transfer_discount": 2.0,
+                          "transfer_discount_text": "2.00",
+                          "daily_cap": 15.0, "daily_cap_text": "15.00",
+                          "day_split_hour": 5} },
   "rows": [
     {
       "card": "A001", "seq": 2,

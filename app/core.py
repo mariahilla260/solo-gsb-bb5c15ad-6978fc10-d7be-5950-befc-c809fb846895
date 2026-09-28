@@ -434,14 +434,35 @@ def validate_config(cfg: Config) -> list[dict]:
     return errors
 
 
+def amount_input_value(value, text):
+    """挑选用于解析的金额入参：精确十进制文本优先，数字字段兜底。
+
+    GET 接口同时输出数字金额（元，浮点）与 ``*_text`` 精确十进制文本；
+    前端回填后提交时，文本框原样回传 ``*_text``，保证超大金额
+    （超出 JS Number 安全整数范围，如 92233720368547758.07）不经过
+    浮点往返。仅当文本缺失（旧客户端）时才回退到数字字段。
+    显式传入空串视为缺字段，回退数字字段（数字字段也缺失 / 为 None
+    时按非法值处理，由 amount_cents 产出带字段名的 CONFIG_BAD）。
+    """
+    if text is not None and str(text).strip() != "":
+        return text
+    return value
+
+
 def build_config_from_input(transfer_minutes, transfer_discount,
-                            daily_cap, day_split_hour):
+                            daily_cap, day_split_hour,
+                            transfer_discount_text=None,
+                            daily_cap_text=None):
     """从 JSON 入参构造 Config；金额按十进制解析为整数分。
 
     与文本录入同一金额口径：非负、最多两位小数、换算为分后处于
     SQLite 有符号 64 位整数范围内；非法输入返回带字段名
     （location.param）的 CONFIG_BAD 错误。成功返回 (Config, None)，
     失败返回 (None, [错误…])，调用方据此返回 422 且不写任何数据。
+
+    金额优先使用精确十进制文本（transfer_discount_text /
+    daily_cap_text），缺省时回退数字字段，使「读取 → 回填 → 未编辑
+    再保存」与「复制到草案试算」对超大金额也能原值往返。
     """
     errors: list[dict] = []
 
@@ -450,10 +471,13 @@ def build_config_from_input(transfer_minutes, transfer_discount,
             "CONFIG_BAD", "换乘有效间隔必须为正整数（分钟）",
             param="transfer_minutes"))
     discount_cents, e1 = amount_cents(
-        transfer_discount, "换乘抵扣额", "transfer_discount")
+        amount_input_value(transfer_discount, transfer_discount_text),
+        "换乘抵扣额", "transfer_discount")
     if e1 is not None:
         errors.append(e1)
-    cap_cents, e2 = amount_cents(daily_cap, "每日封顶额", "daily_cap")
+    cap_cents, e2 = amount_cents(
+        amount_input_value(daily_cap, daily_cap_text),
+        "每日封顶额", "daily_cap")
     if e2 is not None:
         errors.append(e2)
     if not _is_int_value(day_split_hour) \
@@ -930,10 +954,16 @@ def repair_preview(stations: list[Station],
 # ---------------------------------------------------------------------------
 
 def _config_snapshot(cfg: Config) -> dict:
+    # 数字金额字段（元，浮点）保持既有 API 形态；同时给出 *_text
+    # 精确十进制文本（整数分原值格式化，不经过 float），供前端回填 /
+    # 复制草案时原值往返——超大金额的浮点尾数会失真，文本不会。
     return {
         "transfer_minutes": cfg.transfer_minutes,
         "transfer_discount": yuan_of_cents(cfg.transfer_discount_cents),
+        "transfer_discount_text":
+            format_amount_yuan(cfg.transfer_discount_cents),
         "daily_cap": yuan_of_cents(cfg.daily_cap_cents),
+        "daily_cap_text": format_amount_yuan(cfg.daily_cap_cents),
         "day_split_hour": cfg.day_split_hour,
     }
 

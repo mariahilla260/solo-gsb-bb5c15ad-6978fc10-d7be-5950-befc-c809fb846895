@@ -19,6 +19,7 @@ from .core import (
     duration_audit,
     external_merge_preview,
     fare_path_audit,
+    format_amount_yuan,
     gate_queue_sim,
     od_flow_publish,
     parse_fares_text,
@@ -126,6 +127,12 @@ def get_config():
         "transfer_discount": yuan_of_cents(cfg.transfer_discount_cents),
         "daily_cap": yuan_of_cents(cfg.daily_cap_cents),
         "day_split_hour": cfg.day_split_hour,
+        # 精确十进制文本（整数分原值格式化，不经过 float）：
+        # 前端回填与复制草案优先使用这两个字段，超大金额可原值往返；
+        # 数字金额字段保持既有形态，旧客户端不受影响。
+        "transfer_discount_text":
+            format_amount_yuan(cfg.transfer_discount_cents),
+        "daily_cap_text": format_amount_yuan(cfg.daily_cap_cents),
     }
 
 
@@ -133,9 +140,11 @@ def get_config():
 def put_config(body: ConfigIn):
     # 金额按十进制解析为整数分；非法（负数 / 两位以上小数 / 超 64 位范围）
     # 时返回带字段名的 422，不打开写事务：原配置、账单与数据版本不变。
+    # 优先解析 *_text 精确文本（页面回填原值），缺省回退数字字段。
     cfg, errors = build_config_from_input(
         body.transfer_minutes, body.transfer_discount,
-        body.daily_cap, body.day_split_hour)
+        body.daily_cap, body.day_split_hour,
+        body.transfer_discount_text, body.daily_cap_text)
     if errors:
         return _parse_error_response(errors)
     with db.connect() as conn:
@@ -314,18 +323,27 @@ def run_trial_compare(body: TrialConfigIn):
 
         # 草案参数按与正式配置相同的规则解析（金额 -> 整数分）；
         # 非法草案只影响 draft 分块，不读取 / 修改任何已保存数据。
+        # *_text 精确文本优先，保证「复制当前参数到草案」带入的
+        # 超大金额不被 JSON 浮点尾数改写而误报 CONFIG_BAD。
         draft_cfg, draft_errors = build_config_from_input(
             body.transfer_minutes, body.transfer_discount,
-            body.daily_cap, body.day_split_hour)
+            body.daily_cap, body.day_split_hour,
+            body.transfer_discount_text, body.daily_cap_text)
         if draft_errors:
             current = verify(stations, fares, records, current_cfg)
-            # 草案不合法时仍回显原始入参（与请求体一致），不做整数规整
+            # 草案不合法时仍回显原始入参（与请求体一致），不做整数规整；
+            # *_text 为 None（旧客户端未传）时省略，形态与旧响应一致。
             draft_config = {
                 "transfer_minutes": body.transfer_minutes,
                 "transfer_discount": body.transfer_discount,
                 "daily_cap": body.daily_cap,
                 "day_split_hour": body.day_split_hour,
             }
+            if body.transfer_discount_text is not None:
+                draft_config["transfer_discount_text"] = \
+                    body.transfer_discount_text
+            if body.daily_cap_text is not None:
+                draft_config["daily_cap_text"] = body.daily_cap_text
             return JSONResponse(
                 status_code=422,
                 content={
