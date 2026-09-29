@@ -929,11 +929,32 @@ def repair_preview(stations: list[Station],
 # 规则试算对比（不落库、不改配置）
 # ---------------------------------------------------------------------------
 
+# 金额字段在 API 中的「精确十进制文本」兼容键：与既有浮点元键并存。
+# 浮点元键继续可用（普通两位小数可安全往返），文本键用于精确传输
+# 超过 JS Number 安全整数范围的超大金额，保证读取回填 / 再次提交 /
+# 复制到草案试算的原值往返不失真。
+CONFIG_AMOUNT_TEXT_KEYS = {
+    "transfer_discount": "transfer_discount_text",
+    "daily_cap": "daily_cap_text",
+}
+
+
+def amount_text_value(raw_text, raw_number):
+    """选取金额入参：优先精确十进制文本，回退既有 JSON 数字。
+
+    文本兼容键未出现（None）时沿用数字键，旧调用方无需改动；
+    文本键出现（含空串）即以其为准交由统一金额口径校验，非法时 422。
+    """
+    return raw_text if raw_text is not None else raw_number
+
+
 def _config_snapshot(cfg: Config) -> dict:
     return {
         "transfer_minutes": cfg.transfer_minutes,
         "transfer_discount": yuan_of_cents(cfg.transfer_discount_cents),
+        "transfer_discount_text": format_amount_yuan(cfg.transfer_discount_cents),
         "daily_cap": yuan_of_cents(cfg.daily_cap_cents),
+        "daily_cap_text": format_amount_yuan(cfg.daily_cap_cents),
         "day_split_hour": cfg.day_split_hour,
     }
 

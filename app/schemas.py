@@ -26,6 +26,15 @@ class ConfigIn(BaseModel):
     daily_cap: Union[float, str] = Field(
         description="每卡每运营日封顶额（元），非负、最多两位小数")
     day_split_hour: float = Field(description="运营日分界时刻（0-23 的整数小时）")
+    # 精确十进制文本兼容键（可选）：与对应数字键取同一金额值。
+    # 页面回填 / 再次提交超大金额（超过 JS Number 安全整数范围）时
+    # 用文本键原值往返；缺省时回退对应数字键，旧调用方不受影响。
+    transfer_discount_text: Optional[str] = Field(
+        default=None,
+        description="换乘抵扣额的精确十进制文本（元），优先于 transfer_discount")
+    daily_cap_text: Optional[str] = Field(
+        default=None,
+        description="每日封顶额的精确十进制文本（元），优先于 daily_cap")
 
 
 class TrialConfigIn(BaseModel):
@@ -33,12 +42,19 @@ class TrialConfigIn(BaseModel):
 
     不在此处做数值约束：非法草案应走 core.build_config_from_input，
     返回与正式核验一致的 CONFIG_BAD 定位错误（HTTP 422）。
-    金额同样接受数字或十进制字符串（精确传输超大金额）。
+    金额同样接受数字或十进制字符串（精确传输超大金额）；
+    *_text 兼容键与正式配置口径一致（文本优先、缺省回退数字键）。
     """
     transfer_minutes: float = Field(description="草案：换乘有效间隔（分钟）")
     transfer_discount: Union[float, str] = Field(description="草案：换乘抵扣额（元）")
     daily_cap: Union[float, str] = Field(description="草案：每卡每运营日封顶额（元）")
     day_split_hour: float = Field(description="草案：运营日分界时刻（0-23）")
+    transfer_discount_text: Optional[str] = Field(
+        default=None,
+        description="草案：换乘抵扣额的精确十进制文本（元），优先于 transfer_discount")
+    daily_cap_text: Optional[str] = Field(
+        default=None,
+        description="草案：每日封顶额的精确十进制文本（元），优先于 daily_cap")
 
 
 class PeakAuditIn(BaseModel):

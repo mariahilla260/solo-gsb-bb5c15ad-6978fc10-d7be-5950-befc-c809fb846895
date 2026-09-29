@@ -13,12 +13,14 @@ from fastapi.staticfiles import StaticFiles
 
 from . import db
 from .core import (
+    amount_text_value,
     build_config_from_input,
     compensation_preview,
     dispute_preview,
     duration_audit,
     external_merge_preview,
     fare_path_audit,
+    format_amount_yuan,
     gate_queue_sim,
     od_flow_publish,
     parse_fares_text,
@@ -59,7 +61,7 @@ app = FastAPI(
     title="公交刷卡票价核验台",
     description="录入站点分区、票价矩阵、换乘抵扣、每日封顶与刷卡记录，"
                 "按卡号配对进出站并核验计价。",
-    version="1.11.0",
+    version="1.12.0",
     lifespan=lifespan,
 )
 
@@ -121,10 +123,14 @@ class TempFileResponse(FileResponse):
 def get_config():
     with db.connect() as conn:
         cfg = db.get_config(conn)
+    # 金额同时输出浮点元（既有键，保持 API 兼容）与精确十进制文本
+    # （兼容键）：页面回填与「复制到草案」使用文本键，超大金额原值往返。
     return {
         "transfer_minutes": cfg.transfer_minutes,
         "transfer_discount": yuan_of_cents(cfg.transfer_discount_cents),
+        "transfer_discount_text": format_amount_yuan(cfg.transfer_discount_cents),
         "daily_cap": yuan_of_cents(cfg.daily_cap_cents),
+        "daily_cap_text": format_amount_yuan(cfg.daily_cap_cents),
         "day_split_hour": cfg.day_split_hour,
     }
 
@@ -133,9 +139,13 @@ def get_config():
 def put_config(body: ConfigIn):
     # 金额按十进制解析为整数分；非法（负数 / 两位以上小数 / 超 64 位范围）
     # 时返回带字段名的 422，不打开写事务：原配置、账单与数据版本不变。
+    # 文本兼容键优先（页面原值提交，超大金额不经 JS Number / JSON 浮点）；
+    # 未提供文本键的旧调用方仍走数字键。
     cfg, errors = build_config_from_input(
-        body.transfer_minutes, body.transfer_discount,
-        body.daily_cap, body.day_split_hour)
+        body.transfer_minutes,
+        amount_text_value(body.transfer_discount_text, body.transfer_discount),
+        amount_text_value(body.daily_cap_text, body.daily_cap),
+        body.day_split_hour)
     if errors:
         return _parse_error_response(errors)
     with db.connect() as conn:
@@ -313,17 +323,22 @@ def run_trial_compare(body: TrialConfigIn):
         stations, fares, records = db.load_domain(conn)
 
         # 草案参数按与正式配置相同的规则解析（金额 -> 整数分）；
-        # 非法草案只影响 draft 分块，不读取 / 修改任何已保存数据。
+        # 文本兼容键优先，非法草案只影响 draft 分块，不读取 / 修改任何已保存数据。
+        discount_raw = amount_text_value(
+            body.transfer_discount_text, body.transfer_discount)
+        cap_raw = amount_text_value(body.daily_cap_text, body.daily_cap)
         draft_cfg, draft_errors = build_config_from_input(
-            body.transfer_minutes, body.transfer_discount,
-            body.daily_cap, body.day_split_hour)
+            body.transfer_minutes, discount_raw, cap_raw, body.day_split_hour)
         if draft_errors:
             current = verify(stations, fares, records, current_cfg)
-            # 草案不合法时仍回显原始入参（与请求体一致），不做整数规整
+            # 草案不合法时仍回显原始入参（与请求体一致），不做整数规整；
+            # 文本兼容键缺省为 None，页面数字键回显行为与旧版一致。
             draft_config = {
                 "transfer_minutes": body.transfer_minutes,
                 "transfer_discount": body.transfer_discount,
+                "transfer_discount_text": body.transfer_discount_text,
                 "daily_cap": body.daily_cap,
+                "daily_cap_text": body.daily_cap_text,
                 "day_split_hour": body.day_split_hour,
             }
             return JSONResponse(

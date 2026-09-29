@@ -41,6 +41,24 @@ function yuan(v) {
   return Number(v).toFixed(2);
 }
 
+function amountFieldValue(c, key) {
+  // 金额回填优先用后端的精确十进制文本（整数分原值，不经过浮点）；
+  // 兼容键缺失（旧后端 / 其他调用方）时回退数字键并规整为两位小数。
+  const text = c[key + "_text"];
+  if (text !== undefined && text !== null && String(text).trim() !== "") {
+    return text;
+  }
+  return yuan(c[key]);
+}
+
+function readAmount(id) {
+  // 金额输入按原始十进制文本提交：超过 JS Number 安全范围的金额
+  // （如 92233720368547758.07）一旦经过 Number() 就会被舍入，导致
+  // 未编辑再保存把原金额改成邻近值或触发 422。后端按十进制严格校验，
+  // 非法金额仍返回带字段名的 422。
+  return $(id).value.trim();
+}
+
 function actionText(a) {
   return a === "IN" ? "进 ▲" : "出 ▼";
 }
@@ -51,18 +69,29 @@ async function loadConfig() {
   const cfg = await api("/api/config");
   $("cfg-split").value = cfg.day_split_hour;
   $("cfg-minutes").value = cfg.transfer_minutes;
-  $("cfg-discount").value = cfg.transfer_discount;
-  $("cfg-cap").value = cfg.daily_cap;
+  // 金额用精确文本回填，避免超大金额经 Number 舍入成邻近值
+  $("cfg-discount").value = amountFieldValue(cfg, "transfer_discount");
+  $("cfg-cap").value = amountFieldValue(cfg, "daily_cap");
   return cfg;
 }
 
 async function saveConfig() {
+  const discount = readAmount("cfg-discount");
+  const cap = readAmount("cfg-cap");
+  // 金额以原始十进制文本同时写入兼容文本键与既有键（两键均接受字符串），
+  // 不经 JSON 数字，超大金额未编辑再保存也是原值往返。
   const body = {
     day_split_hour: Number($("cfg-split").value),
     transfer_minutes: Number($("cfg-minutes").value),
-    transfer_discount: Number($("cfg-discount").value),
-    daily_cap: Number($("cfg-cap").value),
+    transfer_discount: discount,
+    daily_cap: cap,
+    transfer_discount_text: discount,
+    daily_cap_text: cap,
   };
+  if (!discount || !cap) {
+    toast("换乘抵扣额与每日封顶额必须填写（非负、最多两位小数的元金额）", false);
+    return;
+  }
   try {
     await api("/api/config", { method: "PUT", body: JSON.stringify(body) });
     toast("规则参数已保存");
@@ -76,8 +105,9 @@ async function saveConfig() {
 function fillTrialInputs(cfg) {
   $("trial-split").value = cfg.day_split_hour;
   $("trial-minutes").value = cfg.transfer_minutes;
-  $("trial-discount").value = cfg.transfer_discount;
-  $("trial-cap").value = cfg.daily_cap;
+  // 复制已保存参数到草案：金额走精确十进制文本，原值往返且只读不改配置
+  $("trial-discount").value = amountFieldValue(cfg, "transfer_discount");
+  $("trial-cap").value = amountFieldValue(cfg, "daily_cap");
 }
 
 async function copyCurrentToTrial() {
@@ -86,8 +116,12 @@ async function copyCurrentToTrial() {
 }
 
 function fmtConfig(c) {
+  // 展示金额用精确十进制文本，超大金额（超过 JS 安全整数）不会被
+  // toFixed 改写成科学计数法或邻近值；兼容键缺失时回退浮点键。
+  const discount = amountFieldValue(c, "transfer_discount");
+  const cap = amountFieldValue(c, "daily_cap");
   return `分界 ${c.day_split_hour}:00 · 换乘 ${c.transfer_minutes} 分钟 · ` +
-         `抵扣 ${yuan(c.transfer_discount)} 元 · 封顶 ${yuan(c.daily_cap)} 元`;
+         `抵扣 ${discount} 元 · 封顶 ${cap} 元`;
 }
 
 function deltaClass(v) {
@@ -181,14 +215,21 @@ function renderTrialResult(data) {
 
 async function runTrialCompare() {
   const status = $("trial-status");
+  const discount = readAmount("trial-discount");
+  const cap = readAmount("trial-cap");
+  // 金额按原始十进制文本提交（兼容文本键与既有键都给原值），
+  // 复制到草案的超大金额可原值试算；试算只读，不会保存任何配置。
   const body = {
     day_split_hour: Number($("trial-split").value),
     transfer_minutes: Number($("trial-minutes").value),
-    transfer_discount: Number($("trial-discount").value),
-    daily_cap: Number($("trial-cap").value),
+    transfer_discount: discount,
+    daily_cap: cap,
+    transfer_discount_text: discount,
+    daily_cap_text: cap,
   };
-  if (Object.values(body).some((v) => !Number.isFinite(v))) {
-    status.textContent = "草案四项参数必须全部填写为有效数字";
+  if (!Number.isFinite(body.transfer_minutes) || !Number.isFinite(body.day_split_hour)
+      || !discount || !cap) {
+    status.textContent = "草案四项参数必须全部填写（金额为非负、最多两位小数的元金额）";
     status.className = "status bad";
     return;
   }

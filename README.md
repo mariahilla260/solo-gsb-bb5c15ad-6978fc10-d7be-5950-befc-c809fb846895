@@ -362,6 +362,54 @@ DB_PATH=./bus.db uvicorn app.main:app --host 0.0.0.0 --port 8000
   全程不经过浮点），边界值既不会在保存时触发 SQLite 整数溢出，
   也不会被浮点尾数舍入失真。
 
+#### 规则金额的精确原值往返（本轮修复）
+
+规则的**换乘抵扣额**与**每日封顶额**在库内始终是**整数分**。历史上读取接口
+只输出浮点元，网页回填后又转成 JavaScript `Number`——当金额大到超过 JS 安全
+整数范围（如 **92233720368547758.07 元**）时，回填值会变成近似值，未编辑直接
+再保存会被后端按「两位小数」拒绝（422），「复制到草案试算」也会失真。本轮修复：
+
+- `GET /api/config` 与 `/api/trial-compare` 的配置块在**既有浮点元键**
+  （`transfer_discount` / `daily_cap`，普通金额可安全往返，继续可用）之外，
+  新增**精确十进制文本兼容键** `transfer_discount_text` / `daily_cap_text`
+  （两位小数字符串，直接由整数分格式化，不经过浮点）；
+- `PUT /api/config` 与 `/api/trial-compare` 请求体接受同名可选字段
+  `transfer_discount_text` / `daily_cap_text`；**文本键优先**于数字键，
+  缺省时回退数字键，旧调用方无需任何改动；
+- 页面规则区与试算区的抵扣额 / 封顶额输入框改为**十进制文本输入**：回填、
+  未编辑再保存、「用已保存参数填入草案」与试算提交都使用 `*_text` 原值，
+  全程不经过 `Number()`，**未编辑再次保存不会把原金额改成邻近值**；
+  草案试算使用与当前规则**同一原值**且保持只读（不改配置、不写账单）；
+- 非法金额（负数 / 三位及以上小数 / 超 64 位范围等）仍按既有规则返回
+  **422 + `CONFIG_BAD`**，`location.param` 仍为 `transfer_discount` /
+  `daily_cap`（文本键不改变错误字段名），原配置、账单与数据版本不变。
+
+```bash
+# 保存超大金额（推荐：文本键传精确十进制；数字键与文本键给同一值）
+curl -X PUT http://localhost:8000/api/config -H 'Content-Type: application/json' -d '{
+  "transfer_minutes": 90,
+  "transfer_discount": "92233720368547758.07",
+  "transfer_discount_text": "92233720368547758.07",
+  "daily_cap": "92233720368547758.07",
+  "daily_cap_text": "92233720368547758.07",
+  "day_split_hour": 4
+}'
+
+# 读取：浮点键是近似值，*_text 兼容键是可原值往返的精确值
+curl -s http://localhost:8000/api/config
+# {
+#   "transfer_minutes": 90,
+#   "transfer_discount": 9.223372036854776e16,
+#   "transfer_discount_text": "92233720368547758.07",
+#   "daily_cap": 9.223372036854776e16,
+#   "daily_cap_text": "92233720368547758.07",
+#   "day_split_hour": 4
+# }
+
+# 用读取到的文本键原值再次提交（等价于页面未编辑再保存）：200，库内仍为同一整数分
+# 把同一组文本键值作为草案 POST /api/trial-compare：200，当前/草案均为同一原值
+```
+
 ### 内置演示数据
 
 点击页面右上角 **「载入演示数据」**，会写入 3 个站点、3×3 票价矩阵与若干张卡的记录：
@@ -469,14 +517,33 @@ DB_PATH=./bus.db uvicorn app.main:app --host 0.0.0.0 --port 8000
 }
 ```
 
-两方案均成功时返回 `200`：
+金额字段另接受可选的**精确十进制文本兼容键**
+`transfer_discount_text` / `daily_cap_text`（文本键优先、缺省回退数字键）。
+页面「用已保存参数填入草案」与试算提交均走文本键，使超过 JS 安全整数范围的
+已保存金额（如 `92233720368547758.07`）能以**同一原值**进入草案试算：
+
+```json
+{
+  "transfer_minutes": 90,
+  "transfer_discount": "92233720368547758.07",
+  "transfer_discount_text": "92233720368547758.07",
+  "daily_cap": "92233720368547758.07",
+  "daily_cap_text": "92233720368547758.07",
+  "day_split_hour": 4
+}
+```
+
+两方案均成功时返回 `200`；两侧 `config` 块同样同时给出浮点元键与 `*_text`
+精确文本键（结构同 `GET /api/config`）：
 
 ```json
 {
   "ok": true,
   "current": { "ok": true, "errors": [], "bill_count": 5,
                "config": {"transfer_minutes": 90, "transfer_discount": 1.0,
-                          "daily_cap": 10.0, "day_split_hour": 4} },
+                          "transfer_discount_text": "1.00",
+                          "daily_cap": 10.0, "daily_cap_text": "10.00",
+                          "day_split_hour": 4} },
   "draft":   { "ok": true, "errors": [], "bill_count": 5, "config": { } },
   "rows": [
     {
